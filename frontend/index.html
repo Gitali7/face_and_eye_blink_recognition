@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face & Emotion Recognition</title>
+    <style>
+        :root {
+            --primary-color: #6366f1;
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f8fafc;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        h1 {
+            margin-top: 2rem;
+            font-weight: 300;
+            letter-spacing: 1px;
+        }
+
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2rem;
+            justify-content: center;
+            padding: 2rem;
+            width: 100%;
+            max-width: 1200px;
+        }
+
+        .video-container {
+            position: relative;
+            border-radius: 1rem;
+            overflow: hidden;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+            background: #000;
+            width: 640px;
+            height: 480px;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+            /* Mirror effect */
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            transform: scaleX(-1);
+            /* Match video mirror */
+        }
+
+        .stats-panel {
+            flex: 1;
+            min-width: 300px;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            padding: 1.5rem;
+            border-radius: 1rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+        }
+
+        .stat-label {
+            font-size: 0.875rem;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-top: 0.5rem;
+            color: var(--primary-color);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            background-color: #22c55e20;
+            color: #22c55e;
+        }
+
+        .status-badge.disconnected {
+            background-color: #ef444420;
+            color: #ef4444;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Mood & Focus Detector</h1>
+
+    <div class="container">
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="overlay"></canvas>
+        </div>
+
+        <div class="stats-panel">
+            <div class="card">
+                <div class="stat-label">System Status</div>
+                <div id="connection-status" class="status-badge disconnected">Disconnected</div>
+            </div>
+
+            <div class="card">
+                <div class="stat-label">Current Emotion</div>
+                <div id="emotion-value" class="stat-value">--</div>
+            </div>
+
+            <div class="card">
+                <div class="stat-label">Blink Count</div>
+                <div id="blink-value" class="stat-value">0</div>
+            </div>
+
+            <div class="card">
+                <div class="stat-label">Federated Learning</div>
+                <div class="stat-value" style="font-size: 1rem; color: #fff;">
+                    Updates: <span id="fl-updates">0</span><br>
+                    <span style="font-size: 0.8rem; color: #64748b;">Privacy Preserved</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden canvas for capturing frames -->
+    <canvas id="capture-canvas" style="display:none;"></canvas>
+
+    <script>
+        const video = document.getElementById('video');
+        const captureCanvas = document.getElementById('capture-canvas');
+        const ctx = captureCanvas.getContext('2d');
+        const overlayCanvas = document.getElementById('overlay');
+        const overlayCtx = overlayCanvas.getContext('2d');
+
+        let websocket;
+        const FPS = 10; // Frames per second to send
+
+        // UI Elements
+        const statusEl = document.getElementById('connection-status');
+        const emotionEl = document.getElementById('emotion-value');
+        const blinkEl = document.getElementById('blink-value');
+        const flUpdatesEl = document.getElementById('fl-updates');
+
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 }
+                });
+                video.srcObject = stream;
+
+                video.onloadedmetadata = () => {
+                    captureCanvas.width = video.videoWidth;
+                    captureCanvas.height = video.videoHeight;
+                    overlayCanvas.width = video.videoWidth;
+                    overlayCanvas.height = video.videoHeight;
+                };
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                alert("Could not access camera. Please allow permissions.");
+            }
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            websocket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+            websocket.onopen = () => {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status-badge';
+                statusEl.style.backgroundColor = '#22c55e20';
+                statusEl.style.color = '#22c55e';
+            };
+
+            websocket.onclose = () => {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status-badge disconnected';
+                // Try to reconnect in 2 seconds
+                setTimeout(connectWebSocket, 2000);
+            };
+
+            websocket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                // Update UI Text
+                emotionEl.textContent = data.emotion || '--';
+                blinkEl.textContent = data.blink_count || '0';
+
+                // Clear Overlay
+                overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+                // Draw Tech Overlay
+                if (data.rects && data.rects.length > 0) {
+                    data.rects.forEach(rect => {
+                        const { x, y, w, h, type } = rect;
+
+                        overlayCtx.strokeStyle = '#00ffdb'; // Cyan tech color
+                        overlayCtx.lineWidth = 2;
+
+                        if (type === 'face') {
+                            // Draw Corners instead of full box
+                            const len = w * 0.2;
+                            overlayCtx.beginPath();
+
+                            // Top Left
+                            overlayCtx.moveTo(x, y + len);
+                            overlayCtx.lineTo(x, y);
+                            overlayCtx.lineTo(x + len, y);
+
+                            // Top Right
+                            overlayCtx.moveTo(x + w - len, y);
+                            overlayCtx.lineTo(x + w, y);
+                            overlayCtx.lineTo(x + w, y + len);
+
+                            // Bottom Right
+                            overlayCtx.moveTo(x + w, y + h - len);
+                            overlayCtx.lineTo(x + w, y + h);
+                            overlayCtx.lineTo(x + w - len, y + h);
+
+                            // Bottom Left
+                            overlayCtx.moveTo(x + len, y + h);
+                            overlayCtx.lineTo(x, y + h);
+                            overlayCtx.lineTo(x, y + h - len);
+
+                            overlayCtx.stroke();
+
+                            // Add Label
+                            overlayCtx.fillStyle = '#00ffdb';
+                            overlayCtx.font = '12px Courier New';
+                            overlayCtx.fillText("TARGET_LOCKED", x, y - 5);
+
+                        } else if (type === 'eye') {
+                            // Circular target
+                            overlayCtx.beginPath();
+                            overlayCtx.arc(x + w / 2, y + h / 2, w / 2, 0, 2 * Math.PI);
+                            overlayCtx.strokeStyle = 'rgba(255, 255, 0, 0.7)'; // Yellowish
+                            overlayCtx.stroke();
+
+                        } else if (type === 'mouth') {
+                            // Grid Effect over lips
+                            overlayCtx.strokeStyle = 'rgba(255, 0, 0, 0.5)'; // Reddish grid
+                            overlayCtx.strokeRect(x, y, w, h);
+
+                            // Cross lines
+                            overlayCtx.beginPath();
+                            overlayCtx.moveTo(x + w / 2, y);
+                            overlayCtx.lineTo(x + w / 2, y + h);
+                            overlayCtx.moveTo(x, y + h / 2);
+                            overlayCtx.lineTo(x + w, y + h / 2);
+                            overlayCtx.stroke();
+
+                        } else if (type === 'eyebrow') {
+                            // Eyebrow Grid
+                            const isAngry = (data.emotion === 'Angry');
+
+                            overlayCtx.strokeStyle = isAngry ? '#ff0000' : 'rgba(0, 255, 255, 0.3)';
+                            overlayCtx.lineWidth = isAngry ? 3 : 1;
+
+                            // Main Box
+                            overlayCtx.strokeRect(x, y, w, h);
+
+                            // Vertical subdivisions (Analyzing "furrowing")
+                            overlayCtx.beginPath();
+                            for (let i = 1; i < 5; i++) {
+                                overlayCtx.moveTo(x + (w / 5) * i, y);
+                                overlayCtx.lineTo(x + (w / 5) * i, y + h);
+                            }
+                            overlayCtx.stroke();
+
+                            if (isAngry) {
+                                overlayCtx.fillStyle = '#ff0000';
+                                overlayCtx.font = '10px Courier New';
+                                overlayCtx.fillText("TENSION_DETECTED", x, y - 5);
+                            }
+                        }
+                    });
+                }
+
+                // FL Simulation
+                if (Math.random() > 0.95) {
+                    flUpdatesEl.textContent = parseInt(flUpdatesEl.textContent) + 1;
+                }
+            };
+        }
+
+        function sendFrame() {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+                const dataURL = captureCanvas.toDataURL('image/jpeg', 0.8);
+                // Remove 'data:image/jpeg;base64,'
+                const base64Data = dataURL.split(',')[1];
+                websocket.send(base64Data);
+            }
+        }
+
+        setupCamera().then(() => {
+            connectWebSocket();
+            setInterval(sendFrame, 1000 / FPS);
+        });
+
+    </script>
+</body>
+
+</html>
