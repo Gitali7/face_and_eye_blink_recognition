@@ -4,3 +4,5 @@ websockets
 opencv-python
 numpy
 python-multipart
+fer
+tensorflow
